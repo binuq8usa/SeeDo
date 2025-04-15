@@ -118,6 +118,12 @@ class FrameExtractor:
                 print(f"End of video at frame {frame_counter}")
                 break
 
+            width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            height = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            #channels = self.cap.get(cv2.CAP_PROP_CHANNEL_COUNT)
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            print(f"Frame {frame_counter}: width={width}, height={height}, fps={fps}")
+
             # convert the BGR image to RGB because of OpenCV uses BGR while MediaPipe uses RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -407,9 +413,9 @@ class FrameExtractor:
             base_options=BaseOptions(model_asset_path='./hand_landmarker.task'),
             running_mode=VisionRunningMode.VIDEO,
             num_hands=2,
-            min_hand_detection_confidence=0.2,
-            min_hand_presence_confidence=0.2,
-            min_tracking_confidence=0.2,
+            min_hand_detection_confidence=0.1,
+            min_hand_presence_confidence=0.1,
+            min_tracking_confidence=0.1,
             )
     
     def _visualization_init(self):
@@ -463,8 +469,8 @@ def main(args):
 
 if __name__ == '__main__':
     args = ArgumentParser()
-    args.add_argument('--video_path', type=str, help='The path to the video file.')
-    args.add_argument('--output_dir', type=str, help='The path to the output directory.', default='./output')
+    args.add_argument('--video_path', type=str, help='The path to the video file.', default = './media/P09_R01.mp4')
+    args.add_argument('--output_dir', type=str, help='The path to the output directory.', default='./media')
     args.add_argument('--gaussian_sigma', type=int, help='The sigma value for the Gaussian filter.', default=5)
     args.add_argument('--prominence', type=float, help='The prominence value for the find_peaks function.', default=0.8)
     main(args)

@@ -10,6 +10,7 @@ import base64
 from io import BytesIO
 from collections import Counter
 import ast
+from pathlib import Path 
 
 import numpy as np
 import torch
@@ -20,6 +21,7 @@ import cv2
 import scipy.signal
 import matplotlib.pyplot as plt
 
+import httpx
 from openai import OpenAI
 from VLM_CaP.src.key import mykey, projectkey
 from diffusers import StableDiffusionInpaintPipeline
@@ -147,6 +149,10 @@ def load_model_hf(repo_id, filename, ckpt_config_filename, device="cpu"):
 
 def read_video(video_path):
     video_capture = cv2.VideoCapture(video_path)
+
+    # get the fps of the video
+    fps = video_capture.get(cv2.CAP_PROP_FPS)
+    print(f"FPS: {fps}")
 
     if not video_capture.isOpened():
         print("Error: Could not open video.")
@@ -394,7 +400,7 @@ def main(input_video_path, output_video_path, key_frames):
     key_frames = ast.literal_eval(key_frames)
 
     # First Part: Get object list from first key_frame using VLM
-    client = OpenAI(api_key=projectkey)
+    client = OpenAI(api_key=projectkey, http_client=httpx.Client())
 
     ckpt_repo_id = "ShilongLiu/GroundingDINO"
     ckpt_filenmae = "groundingdino_swinb_cogcoor.pth"
@@ -430,6 +436,9 @@ def main(input_video_path, output_video_path, key_frames):
 
     frames = read_video(video_path)
 
+    # First the object list from the first frame of the video -
+    # TODO: same thing, we can pass a video NOVA model to get the object list from all frames. Based on our prompt
+    # Create a seperate function that takes in a video and gets the object list response
     object_list_response = get_object_list(video_path, client)
 
     num, obj_list = extract_num_object(object_list_response)
@@ -470,6 +479,10 @@ def main(input_video_path, output_video_path, key_frames):
     if best_boxes:
         best_boxes = torch.cat(best_boxes)
         best_logits = torch.stack(best_logits)
+
+    print(f"Best boxes: {best_boxes}")
+    print(f"Best logits: {best_logits}")
+    print(f"Best phases : {best_phrases}")
 
     annotated_frame = my_annotate(
         image_source=image_source,
@@ -519,8 +532,8 @@ def main(input_video_path, output_video_path, key_frames):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    sam2_checkpoint = "segment-anything-2/checkpoints/sam2_hiera_large.pt"
-    model_cfg = "sam2_hiera_l.yaml"
+    sam2_checkpoint = "segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
+    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
     predictor = build_sam2_video_predictor(
         model_cfg, sam2_checkpoint, device="cuda:0"
@@ -542,7 +555,7 @@ def main(input_video_path, output_video_path, key_frames):
     ]
     frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
-    inference_state = predictor.init_state(video_path=video_dir)
+    inference_state = predictor.init_state(video_path=video_dir, offload_video_to_cpu=False)
     predictor.reset_state(inference_state)
 
     prompts = {}  # Hold all the clicks we add for visualization
@@ -574,13 +587,17 @@ def main(input_video_path, output_video_path, key_frames):
     del inference_state
     del predictor
     torch.cuda.empty_cache()
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
 
     predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
 
+    print(f"Video path : {video_path}")
+    
     video_dir = os.path.dirname(video_path) + "/" + video_path.split("/")[-1].split(".")[0]
+    print(f"Video dir : {video_dir}")
     if not os.path.exists(video_dir):
-        video2jpg(video_path, video_dir, 1)
+        print(f"Video dir does not exist, creating it")
+        video2jpg(video_path, video_dir, sample_freq=3)
 
     frame_names = [
         p
@@ -589,7 +606,7 @@ def main(input_video_path, output_video_path, key_frames):
     ]
     frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
-    inference_state = predictor.init_state(video_path=video_dir)
+    inference_state = predictor.init_state(video_path=video_dir, offload_video_to_cpu=False)
     predictor.reset_state(inference_state)
 
     prompts = {}
@@ -648,11 +665,13 @@ def main(input_video_path, output_video_path, key_frames):
 
     # Initialize an empty string to store the result
     bbx_string = ""
+    bbx_dict = {}
 
     # Iterate through the key_frame_coordinates and generate the string
     for key_frame, coordinates in key_frame_coordinates.items():
         coordinates_str = "\n".join(coordinates)  # Join the coordinates into a single string
         bbx_string += f"{key_frame}\n{coordinates_str}\n\n"  # Append the key frame and coordinates
+        bbx_dict[key_frame] = coordinates  # Store in the dictionary
 
     # Print the final bounding box string
     print(f"Bounding box extraction completed. Result:\n{bbx_string}")
@@ -694,6 +713,12 @@ def main(input_video_path, output_video_path, key_frames):
     process_mask_signal(mask_add, mask_min)
     # Return the final bounding box string
     print(bbx_string)
+
+    # save the json string
+    json_file_path = Path(output_video_path).with_suffix(".json")
+    with open(json_file_path, "w") as json_file:
+        json.dump(bbx_dict, json_file, indent=4)
+
     return bbx_string
 
 
@@ -701,9 +726,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Process video with SAM and GroundingDINO."
     )
-    parser.add_argument("--input", type=str, help="Path to the input video")
-    parser.add_argument("--output", type=str, help="Path to the output video")
-    parser.add_argument("--key_frames", type=str, help="List of key frame indices as a string")
+    parser.add_argument("--input", type=str, help="Path to the input video", default='./media/vege-human-1.mp4')
+    parser.add_argument("--output", type=str, help="Path to the output video", default="./media/vege-human-1-tracked")
+    parser.add_argument("--key_frames", type=str, help="List of key frame indices as a string", 
+                        default="[12, 52, 94, 168, 226, 274, 329, 383, 427]")
 
     args = parser.parse_args()
 
